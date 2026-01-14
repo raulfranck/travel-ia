@@ -1,0 +1,16 @@
+{
+  "name": "@travelbot-pro/shared",
+  "version": "1.0.0",
+  "description": "Código compartilhado entre backend e frontend",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.2"
+  }
+}
+
