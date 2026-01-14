@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: travelbot-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: travelbot_pro
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - travelbot-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: travelbot-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - travelbot-network
+    command: redis-server --appendonly yes
+
+  # Opcional: PgAdmin para gerenciar banco
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: travelbot-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@travelbot.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - travelbot-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  travelbot-network:
+    driver: bridge
+
