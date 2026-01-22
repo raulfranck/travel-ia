@@ -13,6 +13,7 @@ import { PaymentModule } from './payment/payment.module';
 import { ExpenseModule } from './expense/expense.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { ChatModule } from './chat/chat.module'; // ⚠️ REMOVER EM PRODUÇÃO
+import { DashboardModule } from './dashboard/dashboard.module';
 
 // Config
 import { databaseConfig } from './config/database.config';
@@ -48,6 +49,7 @@ import { databaseConfig } from './config/database.config';
     ExpenseModule,
     AnalyticsModule,
     ChatModule, // ⚠️ REMOVER EM PRODUÇÃO
+    DashboardModule,
   ],
 })
 export class AppModule {}

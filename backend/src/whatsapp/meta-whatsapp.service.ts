@@ -1,8 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
 import { createHash } from 'crypto';
+import OpenAI from 'openai';
 import { UserService } from '../user/user.service';
 import { TravelService } from '../travel/travel.service';
+import { ExpenseService } from '../expense/expense.service';
+import { AuthService } from '../auth/auth.service';
 
 interface MetaWebhookMessage {
   from: string;
@@ -27,11 +30,18 @@ interface MetaWebhookMessage {
 export class MetaWhatsAppService {
   private readonly logger = new Logger(MetaWhatsAppService.name);
   private readonly apiUrl = 'https://graph.facebook.com/v18.0';
+  private openai: OpenAI;
 
   constructor(
     private readonly userService: UserService,
     private readonly travelService: TravelService,
-  ) {}
+    private readonly expenseService: ExpenseService,
+    private readonly authService: AuthService,
+  ) {
+    this.openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+  }
 
   /**
    * Envia mensagem via Meta WhatsApp Cloud API
@@ -288,6 +298,30 @@ Você ainda não tem despesas registradas.
 Envie uma foto do comprovante para registrar automaticamente (OCR)!`;
     }
 
+    // Comando: /dashboard
+    if (lowerMessage === '/dashboard' || lowerMessage === '/painel' || lowerMessage.includes('dashboard') || lowerMessage.includes('painel')) {
+      try {
+        const token = await this.authService.generateDashboardToken(user.id);
+        const dashboardUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard/${token}`;
+        
+        return `📊 *Acesse seu Dashboard Personalizado*
+
+🔗 ${dashboardUrl}
+
+Este link é válido por 30 dias e mostra:
+✅ Todas as suas viagens
+✅ Gastos em tempo real
+✅ Gráficos e estatísticas
+✅ Orçamento vs Realizado
+
+Salve o link para acessar quando quiser! 🔖`;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        this.logger.error(`Erro ao gerar token do dashboard: ${errorMessage}`);
+        return 'Desculpe, ocorreu um erro ao gerar seu link do dashboard. Tente novamente.';
+      }
+    }
+
     // Comando: /upgrade
     if (lowerMessage === '/upgrade' || lowerMessage.includes('plano')) {
       return this.getUpgradeMessage(user);
@@ -299,11 +333,48 @@ Envie uma foto do comprovante para registrar automaticamente (OCR)!`;
       return this.getUpgradeMessage(user);
     }
 
-    // Processamento de linguagem natural para criar viagem
-    // (Aqui você pode integrar com OpenAI para entender a intenção)
-    return `Entendi! Estou processando sua solicitação... 🤖
+    // Conversa natural - usar IA para processar
+    try {
+      const intent = await this.detectIntent(message);
+      
+      if (intent.type === 'plan_trip') {
+        const tripData = await this.extractTripData(message);
+        
+        if (this.isCompleteTripData(tripData)) {
+          return await this.createTripWithAI(user, tripData);
+        } else {
+          return this.askForMissingInfo(tripData);
+        }
+      }
+      
+      if (intent.type === 'check_trips') {
+        const trips = await this.travelService.findAll(user.id);
+        
+        if (trips.length === 0) {
+          return '📋 Você ainda não tem viagens cadastradas.\n\nDigite algo como "Quero ir para Paris" para começar! ✈️';
+        }
+        
+        return `📋 Suas Viagens (${trips.length}):\n\n` + 
+          trips.map((t, i) => `${i + 1}. ${t.destination} - ${t.status}`).join('\n');
+      }
 
-Digite /help para ver todos os comandos disponíveis ou continue conversando naturalmente comigo!`;
+      if (intent.type === 'track_expense') {
+        const expenseData = await this.extractExpenseData(message);
+        
+        if (this.isCompleteExpenseData(expenseData)) {
+          return await this.createExpenseWithAI(user, expenseData);
+        } else {
+          return 'Nao consegui identificar o valor do gasto. Por favor, me diga o valor, o que foi e onde gastou. Exemplo: "Gastei R$ 50 no Uber"';
+        }
+      }
+      
+      // Resposta natural para perguntas gerais
+      return await this.generateNaturalResponse(message);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Erro na IA: ${errorMessage}`);
+      return 'Entendi! Estou processando sua solicitação... 🤖\n\nDigite /help para ver todos os comandos disponíveis ou continue conversando naturalmente comigo!';
+    }
   }
 
   /**
@@ -387,6 +458,282 @@ Limite atual: ${planLimits[user.plan as keyof typeof planLimits]}
 Para fazer upgrade, acesse: https://travelbot.pro/upgrade
 
 Digite /help para ver outros comandos disponíveis.`;
+  }
+
+  /**
+   * Detecta a intenção do usuário usando IA
+   */
+  private async detectIntent(message: string): Promise<{
+    type: 'plan_trip' | 'track_expense' | 'check_trips' | 'general_question' | 'other';
+    confidence: number;
+    data?: any;
+  }> {
+    const response = await this.openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      messages: [{
+        role: 'system',
+        content: `Você é um classificador de intenções. Analise a mensagem e retorne JSON:
+{
+  "type": "plan_trip" | "track_expense" | "check_trips" | "general_question" | "other",
+  "confidence": 0.0-1.0
+}
+
+plan_trip: usuário quer planejar/criar uma viagem
+track_expense: usuário quer registrar um gasto
+check_trips: usuário quer ver suas viagens
+general_question: pergunta geral sobre viagens
+other: outro assunto`
+      }, {
+        role: 'user',
+        content: message
+      }],
+      response_format: { type: 'json_object' },
+      temperature: 0.3
+    });
+    
+    return JSON.parse(response.choices[0].message.content || '{}');
+  }
+
+  /**
+   * Extrai dados de viagem da mensagem usando IA
+   */
+  private async extractTripData(message: string): Promise<{
+    destination?: string;
+    startDate?: string;
+    endDate?: string;
+    numberOfPeople?: number;
+    estimatedBudget?: number;
+  }> {
+    const response = await this.openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      messages: [{
+        role: 'system',
+        content: `Extraia dados de viagem do texto em JSON:
+{
+  "destination": "cidade/país" ou null,
+  "startDate": "YYYY-MM-DD" ou null,
+  "endDate": "YYYY-MM-DD" ou null,
+  "numberOfPeople": número ou null,
+  "estimatedBudget": valor em BRL ou null
+}
+
+Inferências permitidas:
+- Se mencionar "em março" e estamos em janeiro 2026, assuma março de 2026
+- Se mencionar duração (ex: "7 dias"), calcule endDate baseado em startDate
+- Normalize nomes de cidades (ex: "rio" -> "Rio de Janeiro")`
+      }, {
+        role: 'user',
+        content: message
+      }],
+      response_format: { type: 'json_object' },
+      temperature: 0.2
+    });
+    
+    return JSON.parse(response.choices[0].message.content || '{}');
+  }
+
+  /**
+   * Cria viagem e gera roteiro usando IA
+   */
+  private async createTripWithAI(user: any, tripData: any): Promise<string> {
+    try {
+      // Criar viagem no banco
+      const trip = await this.travelService.createTrip({
+        userId: user.id,
+        destination: tripData.destination,
+        startDate: new Date(tripData.startDate),
+        endDate: new Date(tripData.endDate),
+        numberOfPeople: tripData.numberOfPeople,
+        estimatedBudget: tripData.estimatedBudget
+      });
+      
+      // Gerar roteiro via IA
+      const updatedTrip = await this.travelService.generateItinerary(trip.id);
+      
+      // Formatar resposta
+      const days = Math.ceil((new Date(tripData.endDate).getTime() - new Date(tripData.startDate).getTime()) / (1000 * 60 * 60 * 24));
+      
+      return `✅ Viagem criada com sucesso!
+
+📍 Destino: ${tripData.destination}
+📅 Período: ${days} dias
+👥 Pessoas: ${tripData.numberOfPeople}
+💰 Orçamento: R$ ${tripData.estimatedBudget?.toLocaleString('pt-BR')}
+
+${updatedTrip.itinerary}
+
+💡 Digite /viagens para ver todas as suas viagens!`;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Erro ao criar viagem: ${errorMessage}`);
+      return 'Desculpe, ocorreu um erro ao criar sua viagem. Tente novamente.';
+    }
+  }
+
+  /**
+   * Verifica se todos os dados necessários foram fornecidos
+   */
+  private isCompleteTripData(data: any): boolean {
+    return !!(data.destination && data.startDate && data.endDate && data.numberOfPeople);
+  }
+
+  /**
+   * Retorna mensagem pedindo informações faltantes
+   */
+  private askForMissingInfo(data: any): string {
+    const missing: string[] = [];
+    
+    if (!data.destination) missing.push('📍 Destino');
+    if (!data.startDate) missing.push('📅 Data de início');
+    if (!data.endDate) missing.push('📅 Data de fim');
+    if (!data.numberOfPeople) missing.push('👥 Número de pessoas');
+    
+    return `Para criar sua viagem, preciso de mais algumas informações:
+
+${missing.join('\n')}
+
+Por favor, me conte ${missing.length > 1 ? 'essas informações' : 'essa informação'}! 😊`;
+  }
+
+  /**
+   * Gera resposta natural usando IA para perguntas gerais
+   */
+  private async generateNaturalResponse(message: string): Promise<string> {
+    const response = await this.openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      messages: [{
+        role: 'system',
+        content: `Você é o TravelBot Pro, um assistente de viagens brasileiro amigável.
+Responda de forma concisa (máximo 200 caracteres) e natural.
+Use emojis apropriados.
+Seja útil e encoraje o usuário a planejar viagens.`
+      }, {
+        role: 'user',
+        content: message
+      }],
+      max_tokens: 100,
+      temperature: 0.8
+    });
+    
+    return response.choices[0].message.content + '\n\n💡 Digite /help para ver o que posso fazer!';
+  }
+
+  // ========== Expense Management Methods ==========
+
+  private async extractExpenseData(message: string): Promise<any> {
+    try {
+      const prompt = `Extraia informacoes de gasto da mensagem do usuario.
+
+Mensagem: "${message}"
+
+Retorne JSON com:
+{
+  "amount": valor numerico em reais,
+  "category": "accommodation" | "transportation" | "food" | "entertainment" | "shopping" | "other",
+  "description": descricao curta,
+  "date": data no formato YYYY-MM-DD (hoje se nao especificado)
+}
+
+Categorias:
+- accommodation: hotel, hostel, airbnb
+- transportation: uber, taxi, onibus, metro, aviao
+- food: restaurante, lanche, mercado, comida
+- entertainment: passeio, ingresso, tour
+- shopping: compras, lojas
+- other: outros gastos
+
+Exemplos:
+"Gastei 50 reais no Uber" -> {"amount": 50, "category": "transportation", "description": "Uber", "date": "${new Date().toISOString().split('T')[0]}"}
+"Paguei 150 no restaurante ontem" -> {"amount": 150, "category": "food", "description": "Restaurante", "date": "${new Date(Date.now() - 86400000).toISOString().split('T')[0]}"}`;
+
+      const response = await this.openai.chat.completions.create({
+        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+      });
+
+      const content = response.choices[0].message.content;
+      if (!content) {
+        throw new Error('Resposta vazia da IA');
+      }
+
+      return JSON.parse(content);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Erro ao extrair dados de gasto: ${errorMessage}`);
+      return {};
+    }
+  }
+
+  private isCompleteExpenseData(data: any): boolean {
+    return !!(data.amount && data.category && data.description);
+  }
+
+  private async createExpenseWithAI(user: any, expenseData: any): Promise<string> {
+    try {
+      // Busca ultima viagem do usuario
+      const trips = await this.travelService.findAll(user.id);
+      
+      if (trips.length === 0) {
+        return 'Voce ainda nao tem viagens cadastradas. Crie uma viagem primeiro!';
+      }
+
+      // Pega a viagem mais recente ou a proxima
+      const activeTrip = trips.find(t => {
+        const now = new Date();
+        const start = new Date(t.startDate);
+        const end = new Date(t.endDate);
+        return now >= start && now <= end;
+      }) || trips[0];
+
+      // Cria gasto
+      await this.expenseService.create({
+        tripId: activeTrip.id,
+        amount: expenseData.amount,
+        currency: 'BRL',
+        category: expenseData.category,
+        description: expenseData.description,
+        date: new Date(expenseData.date || new Date()),
+      });
+
+      // Calcula total de gastos da viagem
+      const tripExpenses = await this.expenseService.findAll(activeTrip.id);
+      const totalSpent = tripExpenses.reduce((sum, e) => sum + Number(e.amount), 0);
+      const budget = Number(activeTrip.estimatedBudget || 0);
+      const remaining = budget - totalSpent;
+      const percentUsed = budget > 0 ? (totalSpent / budget * 100) : 0;
+
+      return `✅ Gasto registrado com sucesso!
+
+💰 Valor: R$ ${expenseData.amount.toLocaleString('pt-BR')}
+📁 Categoria: ${this.translateCategory(expenseData.category)}
+📝 Descricao: ${expenseData.description}
+🗓️ Viagem: ${activeTrip.destination}
+
+💵 Total gasto: R$ ${totalSpent.toLocaleString('pt-BR')}
+💼 Orcamento: R$ ${budget.toLocaleString('pt-BR')}
+📊 Usado: ${percentUsed.toFixed(1)}%
+${remaining >= 0 ? `✅ Restante: R$ ${remaining.toLocaleString('pt-BR')}` : `⚠️ Acima do orcamento: R$ ${Math.abs(remaining).toLocaleString('pt-BR')}`}
+
+Digite /dashboard para ver o painel completo!`;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Erro ao criar gasto: ${errorMessage}`);
+      return 'Desculpe, ocorreu um erro ao registrar seu gasto. Tente novamente.';
+    }
+  }
+
+  private translateCategory(category: string): string {
+    const translations: Record<string, string> = {
+      accommodation: 'Hospedagem',
+      transportation: 'Transporte',
+      food: 'Alimentacao',
+      entertainment: 'Entretenimento',
+      shopping: 'Compras',
+      other: 'Outros',
+    };
+    return translations[category] || category;
   }
 }
 
