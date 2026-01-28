@@ -52,8 +52,8 @@ export class TravelService {
     // Gera roteiro usando IA
     const itinerary = await this.aiService.generateItinerary({
       destination: trip.destination,
-      startDate: trip.startDate,
-      endDate: trip.endDate,
+      startDate: new Date(trip.startDate), // Converte string para Date
+      endDate: new Date(trip.endDate), // Converte string para Date
       numberOfPeople: trip.numberOfPeople,
       budget: trip.estimatedBudget,
     });
