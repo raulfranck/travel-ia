@@ -44,5 +44,36 @@ export class AuthService {
       },
     };
   }
+
+  async generateDashboardToken(userId: string): Promise<string> {
+    const user = await this.userService.findOne(userId);
+    
+    if (!user) {
+      throw new UnauthorizedException('Usuario nao encontrado');
+    }
+
+    // Token valido por 30 dias
+    const payload = { 
+      sub: user.id, 
+      type: 'dashboard',
+      name: user.name 
+    };
+    
+    return this.jwtService.sign(payload, { expiresIn: '30d' });
+  }
+
+  async verifyDashboardToken(token: string): Promise<{ userId: string; name: string }> {
+    try {
+      const decoded = this.jwtService.verify(token);
+      
+      if (decoded.type !== 'dashboard') {
+        throw new UnauthorizedException('Token invalido');
+      }
+      
+      return { userId: decoded.sub, name: decoded.name };
+    } catch (error) {
+      throw new UnauthorizedException('Token expirado ou invalido');
+    }
+  }
 }
 
